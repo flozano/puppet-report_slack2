@@ -5,6 +5,7 @@ require 'uri'
 require 'json'
 
 Puppet::Reports.register_report(:slack) do
+
   def process
     configdir = File.dirname(Puppet.settings[:config])
     configfile = File.join(configdir, 'slack.yaml')
@@ -12,33 +13,14 @@ Puppet::Reports.register_report(:slack) do
 
     @config = YAML.load_file(configfile)
 
-    @config["statuses"] ||= "changed,failed"
-    statuses = @config["statuses"].split(",")
+    @config['statuses'] ||= 'changed,failed'
+    statuses = @config['statuses'].split(',')
 
-    pretext = "#{self.host} *#{self.status}* (#{self.environment})"
 
     if statuses.include?(self.status)
-      case self.status
-        when "changed"
-          pretext = ":balloon: #{pretext}"
-          color = 'good'
-        when "failed"
-          pretext = ":warning: #{pretext}"
-          color = 'warning'
-        when "unchanged"
-          pretext = ":zzz: #{pretext}"
-          color = '#cccccc'
-        else
-          pretext = ":grey_question: #{pretext}"
-          color = 'warning'
-      end
-
-      payload = make_payload(pretext, message, color)
-
-      @config["channels"].each do |channel|
+      @config['channels'].each do |channel|
         channel.gsub!(/^\\/, '')
-        _payload = payload.merge("channel" => channel)
-        post_to_webhook(URI.parse(@config["webhook"]), channel, _payload)
+        post_to_webhook(URI.parse(@config['webhook']), channel)
         Puppet.notice("Notification sent to slack channel: #{channel}")
       end
     end
@@ -58,7 +40,32 @@ Puppet::Reports.register_report(:slack) do
 
   private
 
-  def message
+  def payload
+    {
+        'username' => (@config['username'] || 'puppet'),
+        'attachments' => [{
+                              'pretext' => pretext,
+                              'text' => full_message,
+                              'mrkdwn_in' => [:text, :pretext],
+                              'color' => color,
+                          }],
+    }
+  end
+
+  def post_to_webhook(uri, channel)
+    https = Net::HTTP.new(uri.host, 443)
+    https.use_ssl = true
+    result = https.post(uri.path, payload.merge('channel' => channel).to_json)
+    Puppet.err("POST returned #{result.code} #{result.msg} (body=#{result.body})") unless result.code == 200
+    result
+  end
+
+  def pretext
+    "#{status_icon} #{self.host} *#{self.status}* (#{self.environment})"
+  end
+
+
+  def full_message
     resources_message + logs_message
   end
 
@@ -73,33 +80,43 @@ Puppet::Reports.register_report(:slack) do
   end
 
   def logs_message
-    log_text = self.logs.select { |x| self.status == 'failed' ||
+    entries_to_log = self.logs.select { |x| self.status == 'failed' ||
         x.level == :warning || x.level == :err ||
-        x.message =~ /\[(.*) changed to (.*)/
-    }.
-        sort { |a, b| a.time <=> b.time }.
+        x.message =~ /(.*)changed to(.*)/
+    }
+    return '' if entries_to_log.empty?
+
+    log_text = entries_to_log.sort { |a, b| a.time <=> b.time }.
         map { |x| "#{x.time} - #{x.level} - #{x.source}: #{x.message.gsub("\n", '')}" }.join("\n")
 
-    return "```\n#{log_text.gsub(/^(.{6000,}?).*$/m, '\1\n...')}\n```"
+    return "```\n#{log_text.gsub(/^(.{6000,}?).*$/m, "\1\n...")}\n```"
   end
 
-  def make_payload(pretext, message, color)
-    {
-        "username" => (@config["username"] || "puppet"),
-        "attachments" => [{
-                              "pretext" => pretext,
-                              "text" => message,
-                              "mrkdwn_in" => [:text, :pretext],
-                              "color" => color,
-                          }],
-    }
+  def color
+    case self.status
+      when 'changed'
+        return 'good'
+      when 'failed'
+        return 'warning'
+      when 'unchanged'
+        return '#cccccc'
+      else
+        return 'warning'
+    end
   end
 
-  def post_to_webhook(uri, channel, payload)
-    https = Net::HTTP.new(uri.host, 443)
-    https.use_ssl = true
-    result = https.post(uri.path, payload.to_json)
-    Puppet.err("POST returned #{result.code} #{result.msg} (body=#{result.body})") unless result.code == 200
-    result
+  def status_icon
+    case self.status
+      when 'changed'
+        return ':balloon:'
+      when 'failed'
+        return ':warning:'
+      when 'unchanged'
+        return ':zzz:'
+      else
+        return ':grey_question:'
+    end
   end
+
+
 end
